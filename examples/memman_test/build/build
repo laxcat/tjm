@@ -1,0 +1,9 @@
+#!/usr/bin/env zsh
+
+clang++ \
+    ../main.cpp \
+    -I../../../ \
+    -std=c++20 \
+    -o ng  \
+&& \
+    ./ng
