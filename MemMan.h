@@ -4,8 +4,9 @@
 #include <new>
 #include <bit>
 
-#warning "remove me"
+#ifdef MEMMAN_ENABLE_PRINT
 #include <stdio.h>
+#endif // MEMMAN_ENABLE_PRINT
 
 /*
 
@@ -25,7 +26,7 @@ Features:
     straightforward `malloc` call.
     - Everything is always aligned and sized to universal ALIGN.
     - SmallBlocks allocation available for sizes less than ALIGN.
-    - Configure using MemManConfig
+    - Configure using MemManConfig and MEMMAN_ENABLE_PRINT
 
 Example:
 
@@ -54,7 +55,6 @@ struct MemManConfig {
     size_t SMALL_BLOCKS_SIZE = 4_KB;
     uint8_t ALIGN = 16;
     uint8_t BYTES_PER_SMALL_BLOCK = ALIGN;
-    bool ENABLE_PRINT = false;
 };
 
 template <MemManConfig CONFIG>
@@ -64,7 +64,6 @@ class alignas(CONFIG.ALIGN) MemMan {
     static constexpr size_t SMALL_BLOCKS_SIZE = CONFIG.SMALL_BLOCKS_SIZE;
     static constexpr uint8_t ALIGN = CONFIG.ALIGN;
     static constexpr uint8_t BYTES_PER_SMALL_BLOCK = CONFIG.BYTES_PER_SMALL_BLOCK;
-    static constexpr bool ENABLE_PRINT = CONFIG.ENABLE_PRINT;
 
 // check
     static_assert(ALIGN == 16 || ALIGN == 8 || ALIGN == 4, "ALIGN VALID VALUES: 4, 8, 16");
@@ -81,23 +80,32 @@ private:
 // API
 public:
     void * alloc(size_t size, char const * label = nullptr) {
+        void * ptr;
         for (Chunk * c = &baseChunk; c; c = c->nextChunk) {
-            return c->alloc(size, label);
+            if ((ptr = c->alloc(size, label))) {
+                return ptr;
+            }
         }
         return nullptr;
     }
 
-    void free(void * ptr) {
+    bool free(void * ptr) {
+        bool didFree;
         for (Chunk * c = &baseChunk; c; c = c->nextChunk) {
-            c->free(ptr);
+            if ((didFree = c->free(ptr))) {
+                return true;
+            }
         }
+        return false;
     }
 
-    void printStatus() const {
+    #ifdef MEMMAN_ENABLE_PRINT
+    void printStatus(char const * msg = "") const {
         for (Chunk const * c = &baseChunk; c; c = c->nextChunk) {
-            c->printStatus();
+            c->printStatus(msg);
         }
     }
+    #endif
 
 // internals
 private:
@@ -203,6 +211,7 @@ private:
                 return nullptr;
             }
 
+            #ifdef MEMMAN_ENABLE_PRINT
             void printStatus() const {
                 printf("Block %p [%-*s] %s %10d, %p—%p\n",
                     this,
@@ -214,6 +223,7 @@ private:
                     next()
                 );
             }
+            #endif
 
         private:
             bool merge(Block * a, Block * b) {
@@ -249,10 +259,11 @@ private:
             }();
 
             /*
-            `data` Layout where n = SmallBlockCount:
+            `data` layout where n = SmallBlockCount:
             
-            [ block 0 ][ block 1 ]...[ block n-1 ][ freelist byte (0-8) ]...[ freelist byte (...n-1...) ]
+            [ block 0 ][ block 1 ]...[ block n-1 ][ freelist ]
 
+            (see freelist() for freelist sublayout)
             */
             byte_t data[SMALL_BLOCKS_SIZE];
 
@@ -264,6 +275,10 @@ private:
                 return (void *)((byte_t *)data + i * BYTES_PER_SMALL_BLOCK);
             }
 
+            /*
+            array of bytes, use freeListByteCount() for length
+            byte 0 MSB = index 0
+            */
             byte_t const * freeList() const {
                 if constexpr (SMALL_BLOCKS_SIZE) {
                     // return the position direcly after the last block
@@ -332,29 +347,17 @@ private:
                         freeListStart[byte] & ~(msbValue >> bit);
             }
 
-            bool freeListBit(size_t i) {
-                #warning "fix me";
-                return true;
-                // byte_t * freeListStart = freeList();
-                // size_t byte = i / BitsPerByte;
-                // size_t bit  = i % BitsPerByte;
-                // static constexpr byte_t msbValue = 0b10000000;
-                // freeListStart[byte] = (value) ?
-                //     // set bit (bit is now 1, not free, claimed)
-                //         freeListStart[byte] | (msbValue >> bit) :
-                //     // clear bit (bit is now 0, free, not claimed)
-                //         freeListStart[byte] & ~(msbValue >> bit);
-            }
-
             byte_t * next() const {
                 return (byte_t *)data + SMALL_BLOCKS_SIZE;
             }
 
+            #warning "not working?"
+            #ifdef MEMMAN_ENABLE_PRINT
             void printStatus() const {
                 static constexpr byte_t msbValue = 0b10000000;
                 // byte_t check = *((SmallBlocks *)this)->freeList();
                 size_t freeListByteCount = (byte_t *)data + SMALL_BLOCKS_SIZE - freeList();
-                printf("SmallBlocks %p\n", this);
+                printf("SmallBlocks %p, block count: %zu\n", this, SmallBlockCount);
                 printf("[");
                 size_t i = 0;
 
@@ -369,7 +372,7 @@ private:
                 }
                 printf("]\n");
             }
-
+            #endif
         }; // struct SmallBlocks
 
         static constexpr size_t DATA_SIZE = SIZE - sizeof(Block *) - sizeof(Chunk *);
@@ -450,19 +453,19 @@ private:
             return nextChunk->alloc(size, label);
         }
 
-        void free(void * ptr) {
+        bool free(void * ptr) {
             // out of range
             if (ptr < data) {
-                return;
+                return false;
             }
             if constexpr (SMALL_BLOCKS_SIZE) {
                 if (ptr < smallBlocks()->next()) {
                     smallBlocks()->free(ptr);
-                    return;
+                    return true;
                 }
             }
             if (ptr >= data + SIZE) {
-                return;
+                return false;
             }
 
             Block * block = blockForPtr(ptr);
@@ -470,13 +473,18 @@ private:
                 Block * prev = block->prev(firstBlock());
                 block->releaseAndMerge(prev);
             }
+            return true;
         }
 
         Block * blockForPtr(void * ptr) {
             return (Block *)((byte_t *)ptr - sizeof(Block));
         }
 
-        void printStatus() const {
+        #ifdef MEMMAN_ENABLE_PRINT
+        void printStatus(char const * msg) const {
+            if (msg[0]) {
+                printf("%s\n", msg);
+            }
             printf("--------------------------------------------------------------------------------\n");
             byte_t const * de = dataEnd();
             printf("Chunk %zu (%p—%p]\n", SIZE, data, this + sizeof(Chunk));
@@ -491,8 +499,9 @@ private:
             }
             printf("ffree %p %p (%s)\n", &firstFree, firstFree, (firstFree)?firstFree->label:"");
             printf("nextc %p %p\n", &nextChunk, nextChunk);
-            printf("--------------------------------------------------------------------------------\n");
+            printf("--------------------------------------------------------------------------------\n\n");
         }
+        #endif
     }; // struct Chunk
 
 };

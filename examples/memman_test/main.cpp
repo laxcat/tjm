@@ -1,10 +1,11 @@
+#define MEMMAN_ENABLE_PRINT
 #include "MemMan.h"
+#undef MEMMAN_ENABLE_PRINT
 #include "memory.h"
-#include <stdio.h>
 
 int main(int argc, char ** argv) {
 
-    mem.printStatus();
+    mem.printStatus("before alloc");
 
     void * ptr0 = mem.alloc(15, "fart0");
     // void * ptr1 = mem.alloc(10, "fart1");
@@ -16,11 +17,11 @@ int main(int argc, char ** argv) {
     // printf("ptr2: %p\n", ptr2);
     // printf("ptr3: %p\n", ptr3);
 
-    mem.printStatus();
+    mem.printStatus("after alloc");
 
     mem.free(ptr0);
 
-    mem.printStatus();
+    mem.printStatus("after free");
 
     // ptr0 = mem.alloc(15, "fart0");
 
