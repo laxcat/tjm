@@ -356,19 +356,17 @@ private:
             void printStatus() const {
                 static constexpr byte_t msbValue = 0b10000000;
                 // byte_t check = *((SmallBlocks *)this)->freeList();
-                size_t freeListByteCount = (byte_t *)data + SMALL_BLOCKS_SIZE - freeList();
+                size_t freeListByteCount = this->freeListByteCount();
                 printf("SmallBlocks %p, block count: %zu\n", this, SmallBlockCount);
                 printf("[");
                 size_t i = 0;
 
-                for (size_t byteI = 0; byteI < freeListByteCount; ++byteI) {
-                    byte_t * byte = (byte_t *)freeList() + byteI;
-                    for (size_t bitI = 0; bitI < BitsPerByte; ++bitI) {
-                        printf("%s", (*byte & msbValue)?"X":"_");
-                        if (byteI * BitsPerByte + bitI == SmallBlockCount) {
-                            break;
-                        }
-                    }
+                byte_t * fl = (byte_t *)freeList();
+                for (size_t i = 0; i < SmallBlockCount; ++i) {
+                    size_t byteI = i / BitsPerByte;
+                    size_t bitI = i % BitsPerByte;
+                    byte_t * byte = (byte_t *)fl + byteI;
+                    printf("%s", (*byte & (msbValue >> bitI)) ?"X":"_");
                 }
                 printf("]\n");
             }
