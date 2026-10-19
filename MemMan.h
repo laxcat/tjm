@@ -25,7 +25,7 @@ Features:
     straightforward `malloc` call.
     - Everything is always aligned and sized to universal ALIGN.
     - SmallBlocks allocation available for sizes less than ALIGN.
-    - Configure using
+    - Configure using MemManConfig
 
 Example:
 
@@ -51,17 +51,24 @@ static constexpr size_t operator ""_KB(unsigned long long kb) {
 
 struct MemManConfig {
     size_t SIZE = 4_MB;
-    size_t ALIGN = 16;
     size_t SMALL_BLOCKS_SIZE = 4_KB;
-    size_t BYTES_PER_SMALL_BLOCK = ALIGN;
+    uint8_t ALIGN = 16;
+    uint8_t BYTES_PER_SMALL_BLOCK = ALIGN;
+    bool ENABLE_PRINT = false;
 };
 
-template <MemManConfig C>
-class alignas(C.ALIGN) MemMan {
+template <MemManConfig CONFIG>
+class alignas(CONFIG.ALIGN) MemMan {
+
+    static constexpr size_t SIZE = CONFIG.SIZE;
+    static constexpr size_t SMALL_BLOCKS_SIZE = CONFIG.SMALL_BLOCKS_SIZE;
+    static constexpr uint8_t ALIGN = CONFIG.ALIGN;
+    static constexpr uint8_t BYTES_PER_SMALL_BLOCK = CONFIG.BYTES_PER_SMALL_BLOCK;
+    static constexpr bool ENABLE_PRINT = CONFIG.ENABLE_PRINT;
 
 // check
-    static_assert(C.ALIGN == 16 || C.ALIGN == 8 || C.ALIGN == 4, "ALIGN VALID VALUES: 4, 8, 16");
-    static_assert(C.SIZE % C.ALIGN == 0, "SIZE MUST BE MULTIPLE OF ALIGN");
+    static_assert(ALIGN == 16 || ALIGN == 8 || ALIGN == 4, "ALIGN VALID VALUES: 4, 8, 16");
+    static_assert(SIZE % ALIGN == 0, "SIZE MUST BE MULTIPLE OF ALIGN");
 
 // forward
 private:
@@ -86,44 +93,48 @@ public:
         }
     }
 
+    void printStatus() const {
+        for (Chunk const * c = &baseChunk; c; c = c->nextChunk) {
+            c->printStatus();
+        }
+    }
+
 // internals
 private:
 
     static constexpr void * align(void * offset) {
-        return (void *)(((size_t)offset + (C.ALIGN-1)) & ~(C.ALIGN-1));
+        return (void *)(((size_t)offset + (ALIGN-1)) & ~(ALIGN-1));
     }
     static constexpr size_t align(size_t offset) {
-        return (offset + (C.ALIGN-1)) & ~(C.ALIGN-1);
+        return (offset + (ALIGN-1)) & ~(ALIGN-1);
     }
 
-    struct alignas(C.ALIGN) Chunk {
+    struct alignas(ALIGN) Chunk {
 
 
-        struct alignas(C.ALIGN) Block {
-        private:
+        struct alignas(ALIGN) Block {
             // 31-bits, about 2-GB byte limit for each block
             static constexpr size_t BlockMaxSize = 0x7FFFFFFF;
-            static constexpr size_t LabelMax = C.ALIGN - (32 / BitsPerByte);
+            static constexpr size_t LabelMax = ALIGN - (32 / BitsPerByte);
 
             bool claimed:1;
-            uint32_t size:31;
+            uint32_t dataSize:31;
             char label[LabelMax];
 
-        public:
-            Block(size_t blockSize, char const * label, size_t labelLength) :
+            Block(size_t dataSize, char const * label, size_t labelLength) :
                 claimed(false),
-                size(blockSize)
+                dataSize(dataSize)
             {
                 setLabel(label, labelLength);
             }
 
-            void setLabel(char const * label, size_t labelLength) {
+            void setLabel(char const * newLabel, size_t newLabelLength) {
                 if constexpr (LabelMax) {
-                    if (labelLength > LabelMax) {
-                        labelLength = LabelMax;
+                    if (newLabelLength > LabelMax) {
+                        newLabelLength = LabelMax;
                     }
-                    strncpy(this->label, label, labelLength);
-                    this->label[labelLength-1] = '\0';
+                    strncpy(this->label, newLabel, newLabelLength);
+                    this->label[newLabelLength] = '\0';
                 }
             }
 
@@ -132,7 +143,7 @@ private:
             }
 
             Block * next() const {
-                return (Block *)(byte_t *)align((byte_t *)this + sizeof(Block) + size);
+                return (Block *)(byte_t *)align((byte_t *)this + sizeof(Block) + dataSize);
             }
 
             bool claim(size_t newSize) {
@@ -143,21 +154,23 @@ private:
                 size_t alignedNewSize = (size_t)align((void *)newSize);
 
                 // block not big enough
-                if (alignedNewSize > size) {
+                if (alignedNewSize > dataSize) {
                     return false;
                 }
 
                 // split?
                 // only split if there is enough room for a new block with
                 // the ability to store ALIGN (arbitrary) bytes.
-                if (alignedNewSize + sizeof(Block) + C.ALIGN <= size) {
+                if (alignedNewSize + sizeof(Block) + ALIGN <= dataSize) {
                     // split!
-                    new (next()) Block{size - sizeof(Block) - alignedNewSize, "split", 5};
+                    byte_t * splitBlockPtr = (byte_t *)this + sizeof(Block) + alignedNewSize;
+                    size_t splitSize = dataSize - sizeof(Block) - alignedNewSize;
+                    new (splitBlockPtr) Block{splitSize, "split", 5};
                 }
 
                 // claimed!
                 claimed = true;
-                size = newSize;
+                dataSize = newSize;
                 return true;
             }
 
@@ -190,6 +203,18 @@ private:
                 return nullptr;
             }
 
+            void printStatus() const {
+                printf("Block %p [%-*s] %s %10d, %p—%p\n",
+                    this,
+                    (int)LabelMax,
+                    label,
+                    claimed?"(claimed)":"(free)   ",
+                    dataSize,
+                    data(),
+                    next()
+                );
+            }
+
         private:
             bool merge(Block * a, Block * b) {
                 if (!a || !b) {
@@ -198,21 +223,21 @@ private:
                 if (a->claimed || b->claimed) {
                     return false;
                 }
-                a->size += sizeof(Block) + b->size;
+                a->dataSize = align(a->dataSize + sizeof(Block) + b->dataSize);
                 return true;
             }
         }; // struct Block
-        static_assert(sizeof(Block) == C.ALIGN, "BLOCK MUST SIZE OF ALIGN");
+        static_assert(sizeof(Block) == ALIGN, "BLOCK MUST SIZE OF ALIGN");
 
 
-        struct alignas(C.ALIGN) SmallBlocks {
+        struct alignas(ALIGN) SmallBlocks {
             friend struct Chunk;
         private:
             static constexpr size_t SmallBlockCount = [] {
-                ssize_t count = C.SMALL_BLOCKS_SIZE / C.BYTES_PER_SMALL_BLOCK;
+                ssize_t count = SMALL_BLOCKS_SIZE / BYTES_PER_SMALL_BLOCK;
                 while (count > 0) {
                     ssize_t freeListByteCount = (count + BitsPerByte - 1) / BitsPerByte;
-                    if (count * C.BYTES_PER_SMALL_BLOCK + freeListByteCount <= C.SMALL_BLOCKS_SIZE) {
+                    if (count * BYTES_PER_SMALL_BLOCK + freeListByteCount <= SMALL_BLOCKS_SIZE) {
                         break;
                     }
                     --count;
@@ -223,31 +248,49 @@ private:
                 return (size_t)count;
             }();
 
-            byte_t data[C.SMALL_BLOCKS_SIZE];
+            /*
+            `data` Layout where n = SmallBlockCount:
+            
+            [ block 0 ][ block 1 ]...[ block n-1 ][ freelist byte (0-8) ]...[ freelist byte (...n-1...) ]
+
+            */
+            byte_t data[SMALL_BLOCKS_SIZE];
 
             SmallBlocks() {
-                printf("Small Blocks count    %zu\n", SmallBlockCount);
-                printf("Small Blocks data     %p\n",  data);
-                printf("Small Blocks freelist %p\n",  freeList());
-                memset(data, 0, C.SMALL_BLOCKS_SIZE);
+                memset(data, 0, SMALL_BLOCKS_SIZE);
             }
 
             void * operator[](size_t i) const {
-                return (void *)((byte_t *)data + i * C.BYTES_PER_SMALL_BLOCK);
+                return (void *)((byte_t *)data + i * BYTES_PER_SMALL_BLOCK);
             }
 
-            byte_t * freeList() {
-                return data + (SmallBlockCount * C.BYTES_PER_SMALL_BLOCK);
+            byte_t const * freeList() const {
+                if constexpr (SMALL_BLOCKS_SIZE) {
+                    // return the position direcly after the last block
+                    return data + (SmallBlockCount * BYTES_PER_SMALL_BLOCK);
+                }
+                if constexpr (SMALL_BLOCKS_SIZE == 0) {
+                    return nullptr;
+                }
+            }
+
+            size_t freeListByteCount() const {
+                if constexpr (SMALL_BLOCKS_SIZE) {
+                    return (byte_t *)data + SMALL_BLOCKS_SIZE - freeList();
+                }
+                if constexpr (SMALL_BLOCKS_SIZE == 0) {
+                    return 0;
+                }
             }
 
             size_t firstFree() {
-                byte_t * const start = freeList();
-                byte_t * const end = data + C.SMALL_BLOCKS_SIZE;
+                byte_t * const start = (byte_t * const)freeList();
+                byte_t * const end = data + SMALL_BLOCKS_SIZE;
                 for (byte_t * flb = start; flb < end; ++flb) {
                     byte_t b = *flb;
                     // first byte that isn't "full"
                     if (b < 0xff) {
-                        return (flb - start) * BitsPerByte + std::countr_one(b);
+                        return (flb - start) * BitsPerByte + std::countl_one(b);
                     }
                 }
                 // not found
@@ -255,7 +298,7 @@ private:
             }
 
             void * alloc(size_t size, char const * label = nullptr) {
-                if (size > C.BYTES_PER_SMALL_BLOCK) {
+                if (size > BYTES_PER_SMALL_BLOCK) {
                     return nullptr;
                 }
 
@@ -272,55 +315,93 @@ private:
 
             void free(void * ptr) {
                 // find index
-                size_t ff = (size_t)((byte_t *)ptr - data) / C.BYTES_PER_SMALL_BLOCK;
+                size_t ff = (size_t)((byte_t *)ptr - data) / BYTES_PER_SMALL_BLOCK;
                 // unset free list bit
                 setFreeListBit(ff, false);
             }
 
             void setFreeListBit(size_t i, bool value) {
-                byte_t * freeListStart = freeList();
+                byte_t * freeListStart = (byte_t *)freeList();
                 size_t byte = i / BitsPerByte;
                 size_t bit  = i % BitsPerByte;
+                static constexpr byte_t msbValue = 0b10000000;
                 freeListStart[byte] = (value) ?
                     // set bit (bit is now 1, not free, claimed)
-                        freeListStart[byte] | ((byte_t)1 << bit) :
+                        freeListStart[byte] | (msbValue >> bit) :
                     // clear bit (bit is now 0, free, not claimed)
-                        freeListStart[byte] & ~((byte_t)1 << bit);
+                        freeListStart[byte] & ~(msbValue >> bit);
+            }
+
+            bool freeListBit(size_t i) {
+                #warning "fix me";
+                return true;
+                // byte_t * freeListStart = freeList();
+                // size_t byte = i / BitsPerByte;
+                // size_t bit  = i % BitsPerByte;
+                // static constexpr byte_t msbValue = 0b10000000;
+                // freeListStart[byte] = (value) ?
+                //     // set bit (bit is now 1, not free, claimed)
+                //         freeListStart[byte] | (msbValue >> bit) :
+                //     // clear bit (bit is now 0, free, not claimed)
+                //         freeListStart[byte] & ~(msbValue >> bit);
             }
 
             byte_t * next() const {
-                return (byte_t *)data + C.SMALL_BLOCKS_SIZE;
+                return (byte_t *)data + SMALL_BLOCKS_SIZE;
+            }
+
+            void printStatus() const {
+                static constexpr byte_t msbValue = 0b10000000;
+                // byte_t check = *((SmallBlocks *)this)->freeList();
+                size_t freeListByteCount = (byte_t *)data + SMALL_BLOCKS_SIZE - freeList();
+                printf("SmallBlocks %p\n", this);
+                printf("[");
+                size_t i = 0;
+
+                for (size_t byteI = 0; byteI < freeListByteCount; ++byteI) {
+                    byte_t * byte = (byte_t *)freeList() + byteI;
+                    for (size_t bitI = 0; bitI < BitsPerByte; ++bitI) {
+                        printf("%s", (*byte & msbValue)?"X":"_");
+                        if (byteI * BitsPerByte + bitI == SmallBlockCount) {
+                            break;
+                        }
+                    }
+                }
+                printf("]\n");
             }
 
         }; // struct SmallBlocks
 
+        static constexpr size_t DATA_SIZE = SIZE - sizeof(Block *) - sizeof(Chunk *);
+        static constexpr size_t INIT_BLOCK_DATA_SIZE = DATA_SIZE - SMALL_BLOCKS_SIZE - sizeof(Block);
+        byte_t data[DATA_SIZE];
         Block * firstFree;
         Chunk * nextChunk;
-        static constexpr size_t DATA_SIZE = C.SIZE - sizeof(Block *) - sizeof(Chunk *);
-        byte_t data[DATA_SIZE];
 
         Chunk(Chunk * prevChunk = nullptr, Chunk * nextChunk = nullptr) :
-            firstFree(new (firstBlock()) Block{DATA_SIZE - sizeof(Block), "init", 4}),
+            firstFree(new (firstBlock()) Block{INIT_BLOCK_DATA_SIZE, "init", 4}),
             nextChunk(nextChunk)
         {
-            printf("Chunk data            %p\n", data);
-            printf("Chunk firstBlock      %p\n", firstBlock());
-            if constexpr (C.SMALL_BLOCKS_SIZE) {
+            if constexpr (SMALL_BLOCKS_SIZE) {
                 new (data) SmallBlocks{};
             }
         }
 
         Block * firstBlock() const {
-            if constexpr (C.SMALL_BLOCKS_SIZE) {
+            if constexpr (SMALL_BLOCKS_SIZE) {
                 return (Block *)smallBlocks()->next();
             }
-            if constexpr (C.SMALL_BLOCKS_SIZE == 0) {
+            if constexpr (SMALL_BLOCKS_SIZE == 0) {
                 return (Block *)data;
             }
         }
 
+        byte_t const * dataEnd() const {
+            return data + DATA_SIZE;
+        }
+
         SmallBlocks * smallBlocks() const {
-            if constexpr (C.SMALL_BLOCKS_SIZE) {
+            if constexpr (SMALL_BLOCKS_SIZE) {
                 return (SmallBlocks *)data;
             }
         }
@@ -330,7 +411,7 @@ private:
                 return nullptr;
             }
 
-            if constexpr (C.SMALL_BLOCKS_SIZE) {
+            if constexpr (SMALL_BLOCKS_SIZE) {
                 void * ptr;
                 if ((ptr = smallBlocks()->alloc(size))) {
                     return ptr;
@@ -341,9 +422,19 @@ private:
             for (Block * i = firstFree; i; i = i->next()) {
                 if (i->claim(size)) {
                     claimed = i;
-                    if (claimed < firstFree) {
-                        claimed = firstFree;
+
+                    // was this firstFree?
+                    if (firstFree == claimed) {
+                        // if so find first free after this
+                        byte_t const * chunkDataEnd = dataEnd();
+                        for (Block * b = firstBlock(); (byte_t const *)b < chunkDataEnd; b = b->next()) {
+                            if (b->claimed == false) {
+                                firstFree = b;
+                                break;
+                            }
+                        }
                     }
+
                     break;
                 }
             }
@@ -364,13 +455,13 @@ private:
             if (ptr < data) {
                 return;
             }
-            if constexpr (C.SMALL_BLOCKS_SIZE) {
+            if constexpr (SMALL_BLOCKS_SIZE) {
                 if (ptr < smallBlocks()->next()) {
                     smallBlocks()->free(ptr);
                     return;
                 }
             }
-            if (ptr >= data + C.SIZE) {
+            if (ptr >= data + SIZE) {
                 return;
             }
 
@@ -383,6 +474,24 @@ private:
 
         Block * blockForPtr(void * ptr) {
             return (Block *)((byte_t *)ptr - sizeof(Block));
+        }
+
+        void printStatus() const {
+            printf("--------------------------------------------------------------------------------\n");
+            byte_t const * de = dataEnd();
+            printf("Chunk %zu (%p—%p]\n", SIZE, data, this + sizeof(Chunk));
+            if constexpr (SMALL_BLOCKS_SIZE) {
+                printf("-\n");
+                smallBlocks()->printStatus();
+            }
+            printf("-\n");
+            for (Block * b = firstBlock(); (byte_t const *)b < de; b = b->next()) {
+                b->printStatus();
+                printf("-\n");
+            }
+            printf("ffree %p %p (%s)\n", &firstFree, firstFree, (firstFree)?firstFree->label:"");
+            printf("nextc %p %p\n", &nextChunk, nextChunk);
+            printf("--------------------------------------------------------------------------------\n");
         }
     }; // struct Chunk
 
