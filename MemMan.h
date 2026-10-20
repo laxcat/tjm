@@ -1,8 +1,6 @@
 #pragma once
 #include <stdlib.h>
-#include <string.h>
 #include <new>
-#include <bit>
 
 #ifdef MEMMAN_ENABLE_PRINT
 #include <stdio.h>
@@ -17,7 +15,7 @@ Features:
     - Works by splitting preallocated "chunks" of memory into blocks with
     allocation info embeded in memory directly before the allocation.
     - Allocations return raw pointers. There is no reference counting or handle
-    system. The user expected to manually code matching alloc/free calls.
+    system. The user is expected to manually code matching alloc/free calls.
     - Designed to work by preallocating the entire pool of memory and
     allocating from that pool withing application code.
     - When preallocated pool is filled, new linked chunk will be created.
@@ -25,7 +23,8 @@ Features:
     than the planned chunk expansion, in which case we fall back to
     straightforward `malloc` call.
     - Everything is always aligned and sized to universal ALIGN.
-    - SmallBlocks allocation available for sizes less than ALIGN.
+    - SmallBlocks allocation available for sizes less than BYTES_PER_SMALL_BLOCK,
+    which defaults to ALIGN.
     - Configure using MemManConfig and MEMMAN_ENABLE_PRINT
 
 Example:
@@ -33,14 +32,17 @@ Example:
     // make a static allocation somewhere central
     MemMan<4_MB> mem;
 
+    // then, when an allocation is needed call alloc/free in matched pairs
+    byte_t * ptr = mem.alloc(1024)
     ...
-    mem.alloc(1024)
+    mem.free(ptr)
 
 
 */
 
 using byte_t = unsigned char;
 static constexpr size_t BitsPerByte = 8;
+static constexpr byte_t MSBValue = 0b10000000;
 
 static constexpr size_t operator ""_MB(unsigned long long mb) {
     return (size_t)(mb * 1024 * 1024);
@@ -49,6 +51,14 @@ static constexpr size_t operator ""_MB(unsigned long long mb) {
 static constexpr size_t operator ""_KB(unsigned long long kb) {
     return (size_t)(kb * 1024);
 }
+
+// <bit> replacement functions
+static constexpr size_t countl_one(byte_t b);
+
+// <string.h> replacement functions
+static constexpr size_t strlen(char const * str);
+static constexpr char * strncpy(char * dest, const char * src, size_t count);
+static constexpr void * memset(void * dest, byte_t ch, size_t count);
 
 struct MemManConfig {
     size_t SIZE = 4_MB;
@@ -68,6 +78,7 @@ class alignas(CONFIG.ALIGN) MemMan {
 // check
     static_assert(ALIGN == 16 || ALIGN == 8 || ALIGN == 4, "ALIGN VALID VALUES: 4, 8, 16");
     static_assert(SIZE % ALIGN == 0, "SIZE MUST BE MULTIPLE OF ALIGN");
+    static_assert(SMALL_BLOCKS_SIZE % ALIGN == 0, "SMALL_BLOCKS_SIZE MUST BE MULTIPLE OF ALIGN");
 
 // forward
 private:
@@ -308,7 +319,7 @@ private:
                     byte_t b = *flb;
                     // first byte that isn't "full"
                     if (b < 0xff) {
-                        return (flb - start) * BitsPerByte + std::countl_one(b);
+                        return (flb - start) * BitsPerByte + countl_one(b);
                     }
                 }
                 // not found
@@ -342,36 +353,38 @@ private:
                 byte_t * freeListStart = (byte_t *)freeList();
                 size_t byte = i / BitsPerByte;
                 size_t bit  = i % BitsPerByte;
-                static constexpr byte_t msbValue = 0b10000000;
                 freeListStart[byte] = (value) ?
                     // set bit (bit is now 1, not free, claimed)
-                        freeListStart[byte] | (msbValue >> bit) :
+                        freeListStart[byte] | (MSBValue >> bit) :
                     // clear bit (bit is now 0, free, not claimed)
-                        freeListStart[byte] & ~(msbValue >> bit);
+                        freeListStart[byte] & ~(MSBValue >> bit);
             }
 
             byte_t * next() const {
                 return (byte_t *)data + SMALL_BLOCKS_SIZE;
             }
 
-            #warning "not working?"
             #ifdef MEMMAN_ENABLE_PRINT
             void printStatus() const {
-                static constexpr byte_t msbValue = 0b10000000;
-                // byte_t check = *((SmallBlocks *)this)->freeList();
                 size_t freeListByteCount = this->freeListByteCount();
                 printf("SmallBlocks %p, block count: %zu\n", this, SmallBlockCount);
                 printf("[");
                 size_t i = 0;
 
                 byte_t * fl = (byte_t *)freeList();
+                size_t claimedCount = 0;
                 for (size_t i = 0; i < SmallBlockCount; ++i) {
                     size_t byteI = i / BitsPerByte;
                     size_t bitI = i % BitsPerByte;
                     byte_t * byte = (byte_t *)fl + byteI;
-                    printf("%s", (*byte & (msbValue >> bitI)) ?"X":"_");
+                    char c = '_';
+                    if (*byte & (MSBValue >> bitI)) {
+                        c = 'X';
+                        ++claimedCount;
+                    }
+                    printf("%c", c);
                 }
-                printf("]\n");
+                printf("] (%zu claimed)\n", claimedCount);
             }
             #endif
         }; // struct SmallBlocks
@@ -507,3 +520,38 @@ private:
     }; // struct Chunk
 
 };
+
+static constexpr size_t countl_one(byte_t b) {
+    size_t ret = 0;
+    if (b == 0xff) {
+        return BitsPerByte;
+    }
+    while (ret < BitsPerByte && (b & MSBValue)) {
+        ++ret;
+        b <<= 1;
+    }
+    return ret;
+}
+
+static constexpr size_t strlen(char const * str) {
+    char const * i = str;
+    while (i[0]) {
+        ++i;
+    }
+    return i - str;
+}
+
+static constexpr char * strncpy(char * dest, const char * src, size_t count) {
+    for (size_t i = 0; i < count; ++i) {
+        dest[i] = src[i];
+    }
+    return dest;
+}
+
+static constexpr void * memset(void * dest, byte_t ch, size_t count) {
+    byte_t * d = (byte_t *)dest;
+    for (size_t i = 0; i < count; ++i) {
+        d[i] = ch;
+    }
+    return dest;
+}
