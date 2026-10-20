@@ -189,8 +189,11 @@ private:
 
                 claimed = false;
 
-                merge(prev, this);
                 merge(this, next());
+                merge(prev, this);
+
+                setLabel("free", 4);
+
                 return true;
             }
 
@@ -441,6 +444,7 @@ private:
             }
 
             if (claimed) {
+                claimed->setLabel(label, strlen(label));
                 return claimed->data();
             }
 
